@@ -1,0 +1,9 @@
+# gradle
+.gradle/
+build/
+libs/
+
+*.log*
+
+# maven cache
+maven/
