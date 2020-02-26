@@ -20,10 +20,12 @@ package net.octyl.mavencache
 
 import io.ktor.util.cio.use
 import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.core.ExperimentalIoApi
+import io.ktor.utils.io.jvm.javaio.copyTo
+import io.ktor.utils.io.jvm.javaio.toByteReadChannel
+import io.ktor.utils.io.reader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import net.octyl.mavencache.io.readerFromStream
-import net.octyl.mavencache.io.writerFromStream
 import org.slf4j.Logger
 import java.nio.file.Files
 import java.nio.file.Path
@@ -41,13 +43,13 @@ data class Config(
         for (server in servers) {
             logger.info("\t- $server")
         }
-        logger.info("Using maven cache directory: ${cacheDirectory.toAbsolutePath()}")
+        logger.info("Using maven cache directory: ${cacheDirectory.toRealPath()}")
     }
 
     private fun saveTo(properties: MutableProps) {
         properties.putAll(mapOf(
             SERVERS to servers.joinToString(", "),
-            CACHE_DIRECTORY to cacheDirectory.toAbsolutePath().toString()
+            CACHE_DIRECTORY to cacheDirectory.toRealPath().toString()
         ))
     }
 
@@ -55,7 +57,13 @@ data class Config(
         val properties = LinkedHashMap<String, String>().also { saveTo(it) }
         withContext(Dispatchers.IO) {
             Files.createDirectories(location.parent)
-            readerFromStream { Files.newOutputStream(location) }.channel.use {
+            reader {
+                withContext(Dispatchers.IO) {
+                    Files.newOutputStream(location).use { output ->
+                        channel.copyTo(output, limit = Long.MAX_VALUE)
+                    }
+                }
+            }.channel.use {
                 properties.saveTo(this)
             }
         }
@@ -69,16 +77,17 @@ data class Config(
             Config(
                 servers = listOf(
                     "https://jcenter.bintray.com",
-                    "https://plugins.gradle.com/m2"
+                    "https://plugins.gradle.org/m2"
                 ),
                 cacheDirectory = Path.of("./maven")
             ).saveTo(this)
         }
 
+        @UseExperimental(ExperimentalIoApi::class)
         suspend fun loadFrom(location: Path): Config {
             val props = withContext(Dispatchers.IO) {
                 val channel = when {
-                    Files.exists(location) -> writerFromStream { Files.newInputStream(location) }.channel
+                    Files.exists(location) -> Files.newInputStream(location).toByteReadChannel()
                     else -> ByteReadChannel("")
                 }
                 loadPropertiesFrom(channel, defaults = DEFAULT_PROPERTIES)

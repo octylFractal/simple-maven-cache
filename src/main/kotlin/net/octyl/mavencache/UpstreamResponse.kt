@@ -18,6 +18,7 @@
 
 package net.octyl.mavencache
 
+import io.ktor.http.ContentType
 import io.ktor.util.KtorExperimentalAPI
 import io.ktor.util.split
 import io.ktor.utils.io.ByteReadChannel
@@ -25,6 +26,7 @@ import kotlinx.coroutines.CoroutineScope
 
 class UpstreamResponse(
     val contentLength: Long?,
+    val contentType: ContentType,
     val content: ByteReadChannel
 ) {
     init {
@@ -36,7 +38,7 @@ class UpstreamResponse(
     @UseExperimental(KtorExperimentalAPI::class)
     fun split(coroutineScope: CoroutineScope): Pair<UpstreamResponse, UpstreamResponse> {
         val (left, right) = content.split(coroutineScope)
-        return UpstreamResponse(contentLength, left) to
-            UpstreamResponse(contentLength, right)
+        return UpstreamResponse(contentLength, contentType, left) to
+            UpstreamResponse(contentLength, contentType, right)
     }
 }

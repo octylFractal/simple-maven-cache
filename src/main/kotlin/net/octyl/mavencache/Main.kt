@@ -28,6 +28,9 @@ import io.ktor.features.DefaultHeaders
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.OutgoingContent
+import io.ktor.request.uri
+import io.ktor.response.respond
 import io.ktor.response.respondOutputStream
 import io.ktor.response.respondText
 import io.ktor.routing.Routing
@@ -35,9 +38,13 @@ import io.ktor.routing.get
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.util.pipeline.PipelineContext
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.ByteWriteChannel
 import io.ktor.utils.io.jvm.javaio.copyTo
 import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.nio.file.Path
 
 private val LOGGER = LoggerFactory.getLogger("net.octyl.mavencache.MainKt")
@@ -75,16 +82,24 @@ fun Application.mainModule(argv: Array<String>) {
 }
 
 private suspend fun PipelineContext<Unit, ApplicationCall>.handleMavenRequest(cacheManager: CacheManager) {
-    val path = call.parameters.getAll("path").orEmpty().joinToString("/")
-    cacheManager.get(path) { upstream ->
+    try {
+        val path = call.parameters.getAll("path").orEmpty().joinToString("/")
+        val upstream = cacheManager.get(path)
         if (upstream == null) {
             call.respondText("No such entry found.",
                 contentType = ContentType.Text.Plain,
                 status = HttpStatusCode.NotFound)
-            return@get
+            return
         }
-        call.respondOutputStream(ContentType.Application.OctetStream, status = HttpStatusCode.OK) {
-            upstream.content.copyTo(this, limit = upstream.contentLength ?: Long.MAX_VALUE)
+        call.respond(object : OutgoingContent.ReadChannelContent() {
+            override fun readFrom() = upstream.content
+            override val contentLength = upstream.contentLength
+            override val status = HttpStatusCode.OK
+        })
+    } catch (e: Exception) {
+        LOGGER.error("Failed to respond for ${call.request.uri}", e)
+        call.respondText(contentType = ContentType.Text.Plain, status = HttpStatusCode.InternalServerError) {
+            e.printToString()
         }
     }
 }

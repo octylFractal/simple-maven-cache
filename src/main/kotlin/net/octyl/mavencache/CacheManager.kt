@@ -20,30 +20,35 @@ package net.octyl.mavencache
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.features.HttpRequestTimeoutException
+import io.ktor.client.features.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.client.statement.HttpStatement
+import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.isSuccess
-import io.ktor.utils.io.close
-import io.ktor.utils.io.copyTo
-import io.ktor.utils.io.discard
+import io.ktor.network.sockets.ConnectTimeoutException
+import io.ktor.network.sockets.SocketTimeoutException
+import io.ktor.utils.io.WriterJob
+import io.ktor.utils.io.core.ExperimentalIoApi
+import io.ktor.utils.io.jvm.javaio.copyTo
+import io.ktor.utils.io.jvm.javaio.toByteReadChannel
+import io.ktor.utils.io.writeStringUtf8
+import io.ktor.utils.io.writer
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import net.octyl.mavencache.io.readerFrom
-import net.octyl.mavencache.io.readerFromStream
-import net.octyl.mavencache.io.writerFrom
-import net.octyl.mavencache.io.writerFromStream
 import org.slf4j.LoggerFactory
+import java.io.IOException
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.util.concurrent.ConcurrentHashMap
-
-typealias ResponseHandler = suspend (UpstreamResponse?) -> Unit
+import kotlin.streams.asSequence
 
 class CacheManager(
     private val servers: List<String>,
@@ -63,9 +68,20 @@ class CacheManager(
         return cacheDirectory.resolve(path)
     }
 
-    private val client = HttpClient(OkHttp)
+    private val client = HttpClient(OkHttp) {
+        engine {
+            config {
+                followRedirects(true)
+            }
+        }
+        install(HttpTimeout) {
+            connectTimeoutMillis = 5000
+            requestTimeoutMillis = 5000
+            socketTimeoutMillis = 5000
+        }
+    }
 
-    suspend fun get(path: String, block: ResponseHandler) {
+    suspend fun get(path: String): UpstreamResponse? {
         logger.info("Request for '$path'")
         val cachePath = cachePath(path)
         /*
@@ -78,56 +94,75 @@ class CacheManager(
          * - Otherwise, no one is writing, and `writingMutexes` can be cIfA'd for
          *   the above lock, to ensure a unique lock is assigned.
          */
-        if (Files.exists(cachePath)) {
-            // Fully downloaded
-            return useExistingFile(path, cachePath, block)
+        if (!Files.exists(cachePath)) {
+            getAndStoreResponse(path, cachePath) ?: return null
         }
-        // check / make lock
-        // if we make one, _lock it immediately_
-        val lock = checkLockLoop(path, cachePath, block) ?: return
-        // use the lock!
-        try {
-            coroutineScope {
-                for (server in servers) {
-                    client.get<HttpStatement>("$server/$path").execute { response ->
-                        if (response.status.isSuccess()) {
-                            logger.info("Found '$path' at '$server'")
-                            val upstreamResponses = UpstreamResponse(
-                                response.headers[HttpHeaders.ContentLength]?.toLongOrNull(),
-                                response.content
-                            ).split(this)
-                            launch(Dispatchers.IO) {
-                                saveResponseToCache(upstreamResponses.second, cachePath)
-                            }
-                            block(upstreamResponses.first)
-                        }
-                    }
-                }
-            }
-        } finally {
-            lock.unlock()
-        }
+        return useExistingFile(path, cachePath)
     }
 
-    private suspend fun checkLockLoop(path: String, cachePath: Path, block: ResponseHandler): Mutex? {
+    private suspend fun getAndStoreResponse(path: String, cachePath: Path): Unit? {
+        var lock: Mutex
         while (true) {
             var isNewLock = false
-            val lock = writingMutexes.computeIfAbsent(cachePath) {
+            lock = writingMutexes.computeIfAbsent(cachePath) {
                 isNewLock = true
                 Mutex(locked = true)
             }
             if (isNewLock) {
-                return lock
+                // new lock is ours, use it
+                break
             }
-            // there's another lock in the table, lock on it and then use cachePath
-            lock.withLock {}
+            // someone is already downloading it, wait for them to finish & return
+            lock.withLock { }
+            // check if they got it
             if (Files.exists(cachePath)) {
-                useExistingFile(path, cachePath, block)
-                return null
+                return Unit
             }
-            // didn't exist. try to setup another lock to download
-            // but it might be the case that another coroutine beats us, in which case
-            // just try and hold it again.
+            // otherwise, re-acquire lock
+        }
+        try {
+            var savedContent = false
+            for (server in servers) {
+                logger.debug("Trying to get '$path' from '$server'")
+                try {
+                    client.get<HttpStatement>("$server/$path").execute { response ->
+                        if (response.status.isSuccess()) {
+                            logger.debug("Found '$path' at '$server'")
+                            saveResponseToCache(UpstreamResponse(
+                                response.headers[HttpHeaders.ContentLength]?.toLongOrNull(),
+                                ContentType.Application.OctetStream,
+                                response.content
+                            ), cachePath)
+                            savedContent = true
+                        } else {
+                            logger.debug("'$server' said ${response.status} for '$path'")
+                        }
+                    }
+                    if (savedContent) {
+                        break
+                    }
+                } catch (e: Exception) {
+                    when (e) {
+                        is HttpRequestTimeoutException,
+                        is ConnectTimeoutException,
+                        is SocketTimeoutException,
+                        is IOException -> {
+                            logger.warn("Failed to connect to '$server':\n${e.printToString()}")
+                        }
+                        else -> throw e
+                    }
+                }
+            }
+            // remove the lock from the table now
+            // either we have written to cachePath, and all will see it
+            // or we didn't, and they can try to download again
+            writingMutexes.remove(cachePath, lock)
+            return when {
+                savedContent -> Unit
+                else -> null
+            }
+        } finally {
+            lock.unlock()
         }
     }
 
@@ -135,12 +170,12 @@ class CacheManager(
         withContext(Dispatchers.IO) {
             val temporaryFile = Files.createTempFile(cacheDirectory, ".", ".tmp")
             try {
-                val output = readerFromStream { Files.newOutputStream(temporaryFile) }.channel
-                upstreamResponse.content.copyTo(
-                    output,
-                    limit = upstreamResponse.contentLength ?: Long.MAX_VALUE
-                )
-                output.close()
+                Files.newOutputStream(temporaryFile).use { outputStream ->
+                    upstreamResponse.content.copyTo(
+                        outputStream,
+                        limit = upstreamResponse.contentLength ?: Long.MAX_VALUE
+                    )
+                }
                 Files.createDirectories(cachePath.parent)
                 Files.move(temporaryFile, cachePath,
                     StandardCopyOption.REPLACE_EXISTING,
@@ -148,17 +183,62 @@ class CacheManager(
             } finally {
                 Files.deleteIfExists(temporaryFile)
             }
-            logger.info("Saved '$cachePath' for later.")
+            logger.debug("Saved '$cachePath' for later.")
         }
     }
 
-    private suspend fun useExistingFile(path: String, cachePath: Path, block: ResponseHandler) {
-        logger.info("Serving '$cachePath' for '$path'")
-        withContext(Dispatchers.IO) {
-            val input = writerFromStream { Files.newInputStream(cachePath) }.channel
-            block(UpstreamResponse(Files.size(cachePath), input))
-            // dump any input we didn't use to cleanly close the stream
-            input.discard()
+    @UseExperimental(ExperimentalIoApi::class)
+    private fun useExistingFile(path: String, cachePath: Path): UpstreamResponse {
+        logger.debug("Serving '$cachePath' for '$path'")
+        return when {
+            Files.isDirectory(cachePath) -> {
+                UpstreamResponse(null, ContentType.Text.Html, serveIndex(cachePath).channel)
+            }
+            else ->
+                UpstreamResponse(
+                    Files.size(cachePath),
+                    ContentType.Application.OctetStream,
+                    Files.newInputStream(cachePath).toByteReadChannel()
+                )
+        }
+    }
+
+    private fun serveIndex(cachePath: Path): WriterJob {
+        return GlobalScope.writer {
+            withContext(Dispatchers.IO) {
+                channel.writeStringUtf8("""
+                    <!doctype html>
+                    <html lang="en">
+                    <body>
+                    <ul>
+                """.trimIndent())
+                Files.list(cachePath).use { files ->
+                    val visibleFiles = files.asSequence()
+                        .filterNot { it.fileName.toString().startsWith(".") }
+                    for (path in visibleFiles) {
+                        val suffix = when {
+                            Files.isDirectory(path) -> "/"
+                            else -> ""
+                        }
+                        val relPath = "${path.fileName}$suffix"
+                        val href = URLEncoder.encode(relPath, StandardCharsets.UTF_8)
+                            // don't encode slashes
+                            .replace("%2F", "/")
+                        channel.writeStringUtf8("""
+                            <li>
+                            <a href="$href">
+                            $relPath
+                            </a>
+                            </li>
+                        """.trimIndent())
+                    }
+                }
+                channel.writeStringUtf8("""
+                    </ul>
+                    </body>
+                    </html>
+                """.trimIndent())
+            }
         }
     }
 
