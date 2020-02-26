@@ -22,7 +22,7 @@ dependencies {
         "implementation"(lib("classic"))
         "implementation"(lib("core"))
     }
-    commonLib("io.ktor", "ktor", "1.3.0") {
+    commonLib("io.ktor", "ktor", "1.3.1") {
         "implementation"(lib("server-core"))
         "implementation"(lib("server-netty"))
         "implementation"(lib("client-okhttp"))
