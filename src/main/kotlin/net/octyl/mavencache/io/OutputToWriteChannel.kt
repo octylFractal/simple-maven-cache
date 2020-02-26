@@ -22,22 +22,27 @@ import io.ktor.utils.io.ReaderJob
 import io.ktor.utils.io.core.Output
 import io.ktor.utils.io.core.writeFully
 import io.ktor.utils.io.reader
+import io.ktor.utils.io.streams.asOutput
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.OutputStream
 import java.nio.ByteBuffer
 
-fun CoroutineScope.readerFrom(output: Output): ReaderJob {
-    return reader(Dispatchers.IO, autoFlush = true) {
+inline fun CoroutineScope.readerFromStream(crossinline outputStream: () -> OutputStream): ReaderJob {
+    return readerFrom { withContext(Dispatchers.IO) { outputStream().asOutput() } }
+}
+
+fun CoroutineScope.readerFrom(outputProvider: suspend () -> Output): ReaderJob {
+    return reader(autoFlush = true) {
         val buffer = ByteBuffer.allocate(8192)
-        while (!channel.isClosedForRead) {
-            channel.readAvailable(buffer)
-            buffer.flip()
-            output.writeFully(buffer)
-            buffer.clear()
-        }
-    }.also {
-        it.invokeOnCompletion {
-            output.close()
+        outputProvider().use { output ->
+            while (!channel.isClosedForRead) {
+                channel.readAvailable(buffer)
+                buffer.flip()
+                output.writeFully(buffer)
+                buffer.clear()
+            }
         }
     }
 }

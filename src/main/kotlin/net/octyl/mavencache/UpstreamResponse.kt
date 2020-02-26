@@ -21,11 +21,7 @@ package net.octyl.mavencache
 import io.ktor.util.KtorExperimentalAPI
 import io.ktor.util.split
 import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.ByteWriteChannel
-import io.ktor.utils.io.copyTo
 import kotlinx.coroutines.CoroutineScope
-import net.octyl.mavencache.io.readLengthAndStringUtf8
-import net.octyl.mavencache.io.writeLengthAndStringUtf8
 
 class UpstreamResponse(
     val contentLength: Long?,

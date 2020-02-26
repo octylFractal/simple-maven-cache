@@ -27,8 +27,6 @@ import io.ktor.http.isSuccess
 import io.ktor.utils.io.close
 import io.ktor.utils.io.copyTo
 import io.ktor.utils.io.discard
-import io.ktor.utils.io.streams.asInput
-import io.ktor.utils.io.streams.asOutput
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -36,7 +34,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import net.octyl.mavencache.io.readerFrom
+import net.octyl.mavencache.io.readerFromStream
 import net.octyl.mavencache.io.writerFrom
+import net.octyl.mavencache.io.writerFromStream
 import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
@@ -135,15 +135,12 @@ class CacheManager(
         withContext(Dispatchers.IO) {
             val temporaryFile = Files.createTempFile(cacheDirectory, ".", ".tmp")
             try {
-                // silence intellij, near-0 runtime cost
-                withContext(Dispatchers.IO) {
-                    val output = readerFrom(Files.newOutputStream(temporaryFile).asOutput()).channel
-                    upstreamResponse.content.copyTo(
-                        output,
-                        limit = upstreamResponse.contentLength ?: Long.MAX_VALUE
-                    )
-                    output.close()
-                }
+                val output = readerFromStream { Files.newOutputStream(temporaryFile) }.channel
+                upstreamResponse.content.copyTo(
+                    output,
+                    limit = upstreamResponse.contentLength ?: Long.MAX_VALUE
+                )
+                output.close()
                 Files.createDirectories(cachePath.parent)
                 Files.move(temporaryFile, cachePath,
                     StandardCopyOption.REPLACE_EXISTING,
@@ -158,8 +155,7 @@ class CacheManager(
     private suspend fun useExistingFile(path: String, cachePath: Path, block: ResponseHandler) {
         logger.info("Serving '$cachePath' for '$path'")
         withContext(Dispatchers.IO) {
-            val inputStream = Files.newInputStream(cachePath)
-            val input = writerFrom(inputStream.asInput()).channel
+            val input = writerFromStream { Files.newInputStream(cachePath) }.channel
             block(UpstreamResponse(Files.size(cachePath), input))
             // dump any input we didn't use to cleanly close the stream
             input.discard()

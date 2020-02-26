@@ -21,23 +21,28 @@ package net.octyl.mavencache.io
 import io.ktor.utils.io.WriterJob
 import io.ktor.utils.io.core.Input
 import io.ktor.utils.io.core.readAvailable
+import io.ktor.utils.io.streams.asInput
 import io.ktor.utils.io.writer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.InputStream
 import java.nio.ByteBuffer
 
-fun CoroutineScope.writerFrom(input: Input): WriterJob {
-    return writer(Dispatchers.IO, autoFlush = true) {
+inline fun CoroutineScope.writerFromStream(crossinline inputStream: () -> InputStream): WriterJob {
+    return writerFrom { withContext(Dispatchers.IO) { inputStream().asInput() } }
+}
+
+fun CoroutineScope.writerFrom(inputProvider: suspend () -> Input): WriterJob {
+    return writer(autoFlush = true) {
         val buffer = ByteBuffer.allocate(8192)
-        while (!input.endOfInput) {
-            input.readAvailable(buffer)
-            buffer.flip()
-            channel.writeFully(buffer)
-            buffer.clear()
-        }
-    }.also {
-        it.invokeOnCompletion {
-            input.close()
+        inputProvider().use { input ->
+            while (!input.endOfInput) {
+                input.readAvailable(buffer)
+                buffer.flip()
+                channel.writeFully(buffer)
+                buffer.clear()
+            }
         }
     }
 }

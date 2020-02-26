@@ -36,31 +36,32 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.util.pipeline.PipelineContext
 import io.ktor.utils.io.jvm.javaio.copyTo
+import kotlinx.coroutines.runBlocking
 import org.slf4j.LoggerFactory
 import java.nio.file.Path
 
 private val LOGGER = LoggerFactory.getLogger("net.octyl.mavencache.MainKt")
 
-fun main() {
+fun main(argv: Array<String>) {
     embeddedServer(
         Netty,
         host = "localhost",
         port = 5956,
-        watchPaths = listOf("MainKt"),
-        module = Application::mainModule
+        module = { mainModule(argv) }
     ).start(wait = true)
 }
 
-fun Application.mainModule() {
-    val downstreamServers = listOf("https://jcenter.bintray.com")
-    val cacheDirectory = Path.of("./maven")
-    LOGGER.info("Using downstream servers:")
-    for (server in downstreamServers) {
-        LOGGER.info("\t- $server")
+fun Application.mainModule(argv: Array<String>) {
+    val configLocation = Path.of(when {
+        argv.size >= 2 && argv[0] == "--config-location" -> argv[1]
+        else -> "/etc/simple-maven-cache.properties"
+    })
+    LOGGER.info("Loading configuration from ${configLocation.toAbsolutePath()}")
+    val config = runBlocking {
+        Config.loadFrom(configLocation).also { it.saveTo(configLocation) }
     }
-    LOGGER.info("Using maven cache directory: ${cacheDirectory.toAbsolutePath()}")
-    val cacheManager = CacheManager(downstreamServers, cacheDirectory)
-
+    config.logTo(LOGGER)
+    val cacheManager = CacheManager(config.servers, config.cacheDirectory)
     install(DefaultHeaders) {
         header(HttpHeaders.Server, "simple-maven-cache")
     }
