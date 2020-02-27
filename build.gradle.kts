@@ -4,6 +4,7 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 plugins {
     application
     id("com.techshroom.incise-blue") version "0.5.7"
+    id("net.researchgate.release") version "2.8.1"
     kotlin("jvm") version "1.3.61"
 }
 
@@ -12,6 +13,11 @@ inciseBlue {
     license()
     util {
         javaVersion = JavaVersion.VERSION_13
+    }
+    maven {
+        projectDescription = "A simple Maven cache server"
+        coords("octylFractal", "simple-maven-cache")
+        licenseName = "GPL 3.0 or later"
     }
 }
 
