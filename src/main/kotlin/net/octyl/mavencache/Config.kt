@@ -43,13 +43,13 @@ data class Config(
         for (server in servers) {
             logger.info("\t- $server")
         }
-        logger.info("Using maven cache directory: ${cacheDirectory.toRealPath()}")
+        logger.info("Using maven cache directory: $cacheDirectory")
     }
 
     private fun saveTo(properties: MutableProps) {
         properties.putAll(mapOf(
             SERVERS to servers.joinToString(", "),
-            CACHE_DIRECTORY to cacheDirectory.toRealPath().toString()
+            CACHE_DIRECTORY to cacheDirectory.toString()
         ))
     }
 
@@ -79,7 +79,7 @@ data class Config(
                     "https://jcenter.bintray.com",
                     "https://plugins.gradle.org/m2"
                 ),
-                cacheDirectory = Path.of("./maven")
+                cacheDirectory = Path.of("./maven").toAbsolutePath()
             ).saveTo(this)
         }
 
@@ -93,15 +93,15 @@ data class Config(
                 loadPropertiesFrom(channel, defaults = DEFAULT_PROPERTIES)
             }
             val cacheDirectory = Path.of(props.getValue(CACHE_DIRECTORY))
-            withContext(Dispatchers.IO) {
+            return withContext(Dispatchers.IO) {
                 Files.createDirectories(cacheDirectory)
+                Config(
+                    props.getValue(SERVERS).split(',')
+                        .map { it.trim() }
+                        .filterNot { it.isEmpty() },
+                    cacheDirectory.toRealPath()
+                )
             }
-            return Config(
-                props.getValue(SERVERS).split(',')
-                    .map { it.trim() }
-                    .filterNot { it.isEmpty() },
-                cacheDirectory
-            )
         }
     }
 }
